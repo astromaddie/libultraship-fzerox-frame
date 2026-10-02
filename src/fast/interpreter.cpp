@@ -781,6 +781,8 @@ int gGdxTraceSeq = 0;
 // Set by the port bridge when a race venue is loaded; menu screens would
 // otherwise exhaust the probe caps before a race is reached.
 extern "C" int gGdxRaceActive = 0;
+extern "C" int gGdxVrWorldSpritesLastRun; // defined with the VR sprite marker handling
+extern "C" int gGdxVrHudSpritesLastRun;
 // Ring buffer of recent tile writes; flushed to disk only when a suspect draw
 // fires, so the trace shows exactly the SETTILE history leading to that draw.
 #include <deque>
@@ -2530,6 +2532,9 @@ extern "C" float gdx_get_ultrawide_cull_xscale(void) {
 }
 
 float Interpreter::AdjXForAspectRatio(float x) const {
+    if (mVrEyeActive && mVrPass != VrPass::HudOnly) {
+        return x; // the eye projection already spans the eye's real field of view
+    }
     // Skip widescreen adjustment for fixed-size off-screen FBs (HUD elements,
     // small capture buffers), or those which specify a fixed aspect ratio.
     if (mFbActive && mActiveFrameBuffer != mFrameBuffers.end() &&
@@ -2562,6 +2567,12 @@ void Interpreter::AdjustWidthHeightForScale(uint32_t& width, uint32_t& height, u
 }
 
 void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx* vertices) {
+    if (mVrSuppressDraw && !mVrInHudSprites) {
+        return; // nothing is drawn before the HUD marker in a VR HUD pass; skip the transforms
+    }
+    if (mVrInHudSprites && mVrEyeActive && mVrPass == VrPass::WorldOnly) {
+        return;
+    }
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const F3DVtx_t* v = &vertices[i].v;
         const F3DVtx_tn* vn = &vertices[i].n;
@@ -2641,7 +2652,7 @@ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx
                 mFbActive && mActiveFrameBuffer != mFrameBuffers.end() &&
                 (!mActiveFrameBuffer->second.resize || mActiveFrameBuffer->second.forceFixedAspect);
             const bool widescreenFrameActive =
-                !fixedAspectFramebuffer &&
+                !fixedAspectFramebuffer && !(mVrEyeActive && mVrPass != VrPass::HudOnly) &&
                 ((float)mCurDimensions.width / (float)mCurDimensions.height) > (4.0f / 3.0f) &&
                 mWidescreenEnabledCache && !mForceFixedAspectCache;
             if (widescreenFrameActive) {
@@ -2909,6 +2920,12 @@ static const bool sGdxRectHalfTexelDisabled = [] {
 }();
 
 void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bool is_rect) {
+    if (mVrSuppressDraw && !mVrInHudSprites) {
+        return;
+    }
+    if (mVrInHudSprites && mVrEyeActive && mVrPass == VrPass::WorldOnly) {
+        return; // HUD-bracketed drawing (e.g. the FINISH letters) belongs to the HUD layer only
+    }
     // A/B isolation: skip every triangle drawn with the combine mode given in
     // GDX_DIAG_SKIP_COMBINE (hex). Whatever vanishes from the frame identifies
     // the mesh that owns that material.
@@ -4259,7 +4276,9 @@ void Interpreter::GfxDpSetScissor(uint32_t mode, uint32_t ulx, uint32_t uly, uin
     // ~50 call sites ({12,16,308,224} and {12,8,308,232}); intercepting them here is the one
     // chokepoint that also covers static DLs. Exact match only, so split-screen boxes and menu
     // reveal wipes never widen.
-    if (mRemoveBordersCache && ulx == (12 << 2) && lrx == (308 << 2) &&
+    // VR eye targets always drop them: the eye's own field of view is the frame edge, and a fixed
+    // border would sit in the viewer's periphery as a black frame.
+    if ((mRemoveBordersCache || mVrEyeActive) && ulx == (12 << 2) && lrx == (308 << 2) &&
         ((uly == (16 << 2) && lry == (224 << 2)) || (uly == (8 << 2) && lry == (232 << 2)))) {
         ulx = 0;
         uly = 0;
@@ -5157,6 +5176,23 @@ void Interpreter::GfxDrawRectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_
 
 void Interpreter::GfxDpTextureRectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls,
                                         int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
+    // VR: a screen-space sprite at a fixed pixel position in an eye image sits at a different
+    // angle in each eye and is seen double. World passes therefore draw only world-anchored
+    // sprites, re-placed for the eye; HUD-bracketed sprites go to the HUD pass; anything else
+    // drawn before the HUD marker (e.g. stars) is left out. The HUD pass never draws world sprites.
+    if (mVrEyeActive && mVrPass == VrPass::WorldOnly) {
+        if (!mVrWorldSpriteActive || !VrPlaceWorldSprite(&ulx, &uly, &lrx, &lry, &uls, &ult, &dsdx, &dtdy)) {
+            return;
+        }
+        gGdxVrWorldSpritesLastRun++;
+    } else if (mVrEyeActive && mVrPass == VrPass::HudOnly) {
+        if (mVrWorldSpriteActive) {
+            return;
+        }
+        if (mVrInHudSprites) {
+            gGdxVrHudSpritesLastRun++;
+        }
+    }
     // printf("render %d at %d\n", tile, lrx);
     uint64_t saved_combine_mode = mRdp->combine_mode;
     if ((mRdp->other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_COPY) {
@@ -5626,7 +5662,11 @@ bool gfx_noop_handler_f3dex2(F3DGfx** cmd0) {
     const char* filename = (const char*)(cmd)->words.w1;
     uint32_t p = C0(16, 8);
     uint32_t l = C0(0, 16);
-    if (p == 7) {
+    if (p == Interpreter::kVrHudMarker) {
+        mInstance.lock()->OnVrHudMarker();
+    } else if (p >= Interpreter::kVrHudSpritesBegin && p <= Interpreter::kVrWorldSpriteEnd) {
+        mInstance.lock()->OnVrSpriteMarker(p, l);
+    } else if (p == 7) {
         g_exec_stack.openDisp(filename, l);
     } else if (p == 8) {
         if (g_exec_stack.disp_stack.size() == 0) {
@@ -7627,7 +7667,24 @@ void Interpreter::StartFrame() {
     }
     const bool widescreenPillarbox = !mWidescreenEnabledCache || mForceFixedAspectCache;
     sGameFbMsaaResolvedSized = false;
-    if (!ViewportMatchesRendererResolution() || mMsaaLevel > 1 || widescreenPillarbox || mPostShaderCache != 0) {
+    if (mVrEyeActive && mVrPass == VrPass::HudOnly) {
+        // The VR HUD layer is a wide panel: lay the HUD out with the widescreen UI logic so the
+        // edge-anchored elements reach the panel's sides while central ones keep 4:3 proportions,
+        // whatever the desktop widescreen settings are.
+        mWidescreenEnabledCache = true;
+        mWidescreenUiCache = true;
+        mForceFixedAspectCache = false;
+        mHudMaxAspectCache = 1000.0f;
+    }
+    if (mVrEyeActive) {
+        // Eye frames are read back as a texture by the VR presenter: always offscreen, exactly
+        // eye-sized, single-sampled, unfiltered.
+        mPostShaderCache = 0;
+        mRendersToFb = true;
+        mRapi->UpdateFramebufferParameters(mGameFb, mCurDimensions.width, mCurDimensions.height, 1, true, true, true,
+                                           true);
+    } else if (!ViewportMatchesRendererResolution() || mMsaaLevel > 1 || widescreenPillarbox ||
+               mPostShaderCache != 0) {
         mRendersToFb = true;
         if (!ViewportMatchesRendererResolution() || (widescreenPillarbox && mMsaaLevel <= 1)) {
             mRapi->UpdateFramebufferParameters(mGameFb, mCurDimensions.width, mCurDimensions.height, mMsaaLevel, true,
@@ -7751,6 +7808,13 @@ void Interpreter::SetPortAfterClearHook(void (*hook)(Interpreter*)) {
 
 void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements) {
     SpReset();
+    mVrStopRequested = false;
+    mVrMarkerSeen = false;
+    mVrInHudSprites = false;
+    mVrWorldSpriteActive = false;
+    mVrSuppressDraw = (mVrPass == VrPass::HudOnly);
+    gGdxVrWorldSpritesLastRun = 0;
+    gGdxVrHudSpritesLastRun = 0;
 
     // Re-latch the fixed-aspect flag per task: the game can flip its mode between this frame's
     // StartFrame and the gfx task that renders the new mode, so the StartFrame latch alone applies
@@ -7765,8 +7829,8 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
     // caught by the epilogue's fallback branch.
     {
         const bool widescreenPillarbox = !mWidescreenEnabledCache || mForceFixedAspectCache;
-        const bool rendersToFb =
-            !ViewportMatchesRendererResolution() || mMsaaLevel > 1 || widescreenPillarbox || mPostShaderCache != 0;
+        const bool rendersToFb = mVrEyeActive || !ViewportMatchesRendererResolution() || mMsaaLevel > 1 ||
+                                 widescreenPillarbox || mPostShaderCache != 0;
         if (rendersToFb && !mRendersToFb && mMsaaLevel <= 1) {
             // StartFrame never sized mGameFb this frame; reproduce its non-MSAA
             // sizing so the freshly-targeted offscreen render matches the window.
@@ -7804,6 +7868,10 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
     auto dbg = mGfxDebugger;
     g_exec_stack.start((F3DGfx*)commands);
     while (!g_exec_stack.cmd_stack.empty()) {
+        if (mVrStopRequested) {
+            g_exec_stack.stop();
+            break;
+        }
         auto cmd = g_exec_stack.cmd_stack.top();
 
         if (dbg->IsDebugging()) {
@@ -7892,8 +7960,124 @@ void Interpreter::Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_r
     }
 }
 
+void Interpreter::OnVrHudMarker() {
+    mVrMarkerSeen = true;
+    if (mVrPass == VrPass::WorldOnly) {
+        mVrStopRequested = true; // Run() stops before the next command
+    } else if (mVrPass == VrPass::HudOnly) {
+        mVrSuppressDraw = false;
+    }
+}
+
+bool (*Interpreter::sVrWorldSpriteResolver)(uint32_t id, VrWorldSprite* out) = nullptr;
+
+// Per-Run counts of VR sprites actually drawn, for the host's diagnostics.
+extern "C" {
+int gGdxVrWorldSpritesLastRun = 0;
+int gGdxVrHudSpritesLastRun = 0;
+}
+
+void Interpreter::SetVrWorldSpriteResolver(bool (*resolver)(uint32_t id, VrWorldSprite* out)) {
+    sVrWorldSpriteResolver = resolver;
+}
+
+void Interpreter::OnVrSpriteMarker(uint32_t code, uint32_t id) {
+    switch (code) {
+        case kVrHudSpritesBegin:
+            mVrInHudSprites = true;
+            break;
+        case kVrHudSpritesEnd:
+            mVrInHudSprites = false;
+            break;
+        case kVrWorldSpriteBegin:
+            mVrWorldSpriteActive = sVrWorldSpriteResolver != nullptr && sVrWorldSpriteResolver(id, &mVrWorldSprite);
+            break;
+        case kVrWorldSpriteEnd:
+            mVrWorldSpriteActive = false;
+            break;
+        default:
+            break;
+    }
+}
+
+// Re-place a world-anchored sprite for the eye being rendered: project its anchor with the loaded
+// projection (the eye's projection*view; world sprites are drawn with an identity modelview) and
+// rebuild the whole rectangle around that point, since the game's rectangle was clipped against
+// the game camera's screen. Also moves the primitive depth to the anchor's eye depth. Returns false
+// when the anchor is behind the eye.
+bool Interpreter::VrPlaceWorldSprite(int32_t* ulx, int32_t* uly, int32_t* lrx, int32_t* lry, int16_t* uls,
+                                     int16_t* ult, int16_t* dsdx, int16_t* dtdy) {
+    const VrWorldSprite& ws = mVrWorldSprite;
+    const float(*P)[4] = mRsp->P_matrix;
+    const float cx = ws.x * P[0][0] + ws.y * P[1][0] + ws.z * P[2][0] + P[3][0];
+    const float cy = ws.x * P[0][1] + ws.y * P[1][1] + ws.z * P[2][1] + P[3][1];
+    const float cz = ws.x * P[0][2] + ws.y * P[1][2] + ws.z * P[2][2] + P[3][2];
+    const float cw = ws.x * P[0][3] + ws.y * P[1][3] + ws.z * P[2][3] + P[3][3];
+    if (!(cw > 0.001f)) {
+        return false;
+    }
+    const float sx = 160.0f + (cx / cw) * 160.0f;
+    const float sy = 120.0f - (cy / cw) * 120.0f;
+    // The sprite was sized in 320x240 pixels of the game camera's view; the eye spans a wider
+    // field, so shrink it by the ratio of the two vertical extents to keep its angular size.
+    float scale = 1.0f;
+    if (ws.gameTanHalfY > 0.0f && mVrEyeTanHalfY > 0.0f) {
+        scale = ws.gameTanHalfY / mVrEyeTanHalfY;
+        scale = scale < 0.2f ? 0.2f : (scale > 2.0f ? 2.0f : scale);
+    }
+    const int32_t left = (int32_t)lroundf((sx - ws.pivotX * scale) * 4.0f);
+    const int32_t top = (int32_t)lroundf((sy - ws.pivotY * scale) * 4.0f);
+    *ulx = left;
+    *uly = top;
+    *lrx = left + (int32_t)lroundf(ws.width * scale * 4.0f) - 1;
+    *lry = top + (int32_t)lroundf(ws.height * scale * 4.0f) - 1;
+    *uls = 0;
+    *ult = 0;
+    *dsdx = (int16_t)lroundf(1024.0f / scale);
+    *dtdy = (int16_t)lroundf(1024.0f / scale);
+    float depth = (cz / cw) * 16352.0f + 16352.0f;
+    depth = depth < 0.0f ? 0.0f : (depth > 32767.0f ? 32767.0f : depth);
+    const uint16_t primDepth = (uint16_t)depth;
+    if (primDepth != mRdp->prim_depth) {
+        Flush();
+        mRdp->prim_depth = primDepth;
+    }
+    return true;
+}
+
+void Interpreter::SetVrEyeTarget(uint32_t width, uint32_t height) {
+    if (!mVrEyeActive) {
+        mVrSavedDimensions = mCurDimensions;
+        mVrSavedMsaaLevel = mMsaaLevel;
+        mVrEyeActive = true;
+    }
+    mCurDimensions.width = width;
+    mCurDimensions.height = height;
+    mCurDimensions.aspect_ratio = (float)width / (float)height;
+    mMsaaLevel = 1;
+}
+
+void Interpreter::ClearVrEyeTarget() {
+    if (!mVrEyeActive) {
+        return;
+    }
+    mVrEyeActive = false;
+    mCurDimensions = mVrSavedDimensions;
+    mMsaaLevel = mVrSavedMsaaLevel;
+}
+
+// Host hook run after the frame is fully composited into the window back buffer and before the
+// swap. Null unless the host installs one (G-Diffuser's OpenXR presenter copies the back buffer
+// into a headset swapchain here), so the stock path pays one pointer test.
+extern "C" {
+void (*gfx_pre_present_hook)(void) = nullptr;
+}
+
 void Interpreter::EndFrame() {
     mRapi->EndFrame();
+    if (gfx_pre_present_hook != nullptr) {
+        gfx_pre_present_hook();
+    }
     mWapi->SwapBuffersBegin();
     mRapi->FinishRender();
     mWapi->SwapBuffersEnd();

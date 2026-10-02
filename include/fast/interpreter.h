@@ -613,6 +613,57 @@ class Interpreter {
     // touching the content-keyed GPU texture cache or any live resource handle (the reverted
     // full *mRdp restore did both and broke boost/heal plates and the HUD digit).
     void ResetRdpForReplay();
+    // VR eye target. While set, StartFrame/Run render offscreen at exactly width x height with no
+    // MSAA, no post shader and no hor+ widescreen correction (the eye projection already defines
+    // the field of view), and the finished image is left in the game framebuffer texture
+    // (GetGameFramebufferTexture). Clearing restores the desktop dimensions and settings.
+    void SetVrEyeTarget(uint32_t width, uint32_t height);
+    void ClearVrEyeTarget();
+    bool IsVrEyeTargetActive() const {
+        return mVrEyeActive;
+    }
+    // Which part of a display list a VR replay draws, split at the host's HUD marker (a G_NOOP
+    // with sub-code kVrHudMarker, emitted right before the race HUD). WorldOnly stops at the
+    // marker; HudOnly executes everything for its state but draws nothing until the marker.
+    // A list without the marker draws entirely in Full/WorldOnly and not at all in HudOnly.
+    enum class VrPass { Full, WorldOnly, HudOnly };
+    static constexpr uint32_t kVrHudMarker = 0x56;
+    // Screen-space sprites the game draws before the HUD marker are bracketed by the host:
+    // kVrHudSpritesBegin/End around sprites that belong to the HUD (drawn by the HudOnly pass even
+    // though they precede the marker), kVrWorldSpriteBegin/End around a sprite anchored to a world
+    // point (re-placed for each eye in WorldOnly passes from the anchor the resolver returns; the
+    // marker's low 16 bits carry the anchor id).
+    static constexpr uint32_t kVrHudSpritesBegin = 0x57;
+    static constexpr uint32_t kVrHudSpritesEnd = 0x58;
+    static constexpr uint32_t kVrWorldSpriteBegin = 0x59;
+    static constexpr uint32_t kVrWorldSpriteEnd = 0x5A;
+    // World-sprite anchor: world position, pivot offset of the anchor inside the sprite and sprite
+    // size, all in native 320x240 pixels.
+    struct VrWorldSprite {
+        float x, y, z;
+        float pivotX, pivotY;
+        float width, height;
+        float gameTanHalfY; // the game camera's vertical half-FOV tangent the sprite was sized for (0: unknown)
+    };
+    // Vertical half-FOV tangent of the eye being rendered; world sprites are scaled by
+    // gameTanHalfY / this so they keep the angular size they have on a flat screen.
+    void SetVrEyeTanHalfY(float tanHalfY) {
+        mVrEyeTanHalfY = tanHalfY;
+    }
+    static void SetVrWorldSpriteResolver(bool (*resolver)(uint32_t id, VrWorldSprite* out));
+    void SetVrPass(VrPass pass) {
+        mVrPass = pass;
+    }
+    bool VrHudMarkerSeen() const {
+        return mVrMarkerSeen;
+    }
+    void OnVrHudMarker();
+    void OnVrSpriteMarker(uint32_t code, uint32_t id);
+    // GL texture name (or backend equivalent) of the last Run()'s offscreen game image, stored
+    // top-down; 0 when the frame rendered straight to the window.
+    uintptr_t GetGameFramebufferTexture() const {
+        return mGfxFrameBuffer;
+    }
 
     // private: TODO make these private
     void Flush();
@@ -732,6 +783,20 @@ class Interpreter {
     uintptr_t mGfxFrameBuffer{};
 
     unsigned int mMsaaLevel = 1;
+    bool mVrEyeActive = false;
+    VrPass mVrPass = VrPass::Full;
+    bool mVrSuppressDraw = false;
+    bool mVrStopRequested = false;
+    bool mVrMarkerSeen = false;
+    bool mVrInHudSprites = false;
+    bool mVrWorldSpriteActive = false;
+    float mVrEyeTanHalfY = 0.0f;
+    VrWorldSprite mVrWorldSprite{};
+    static bool (*sVrWorldSpriteResolver)(uint32_t id, VrWorldSprite* out);
+    bool VrPlaceWorldSprite(int32_t* ulx, int32_t* uly, int32_t* lrx, int32_t* lry, int16_t* uls, int16_t* ult,
+                            int16_t* dsdx, int16_t* dtdy);
+    GfxDimensions mVrSavedDimensions{};
+    unsigned int mVrSavedMsaaLevel = 1;
     bool mDroppedFrame{};
     float* mBufVbo; // 3 vertices in a triangle and 32 floats per vtx
     size_t mBufVboLen{};
