@@ -650,6 +650,15 @@ class Interpreter {
     void SetVrEyeTanHalfY(float tanHalfY) {
         mVrEyeTanHalfY = tanHalfY;
     }
+    // Fog for an eye whose projection uses a different near plane from the game camera's. The RSP
+    // takes fog from z/w, which for these projections is A - B/distance with A and B set by near
+    // and far, so a different near re-maps every distance. The host passes scale k = B_game/B_eye
+    // and bias A_game - k*A_eye; fog then reads bias + k*(z/w), exactly the game camera's value at
+    // the same distance. Identity (1, 0) unless set; ClearVrEyeTarget restores it.
+    void SetVrFogRemap(float scale, float bias) {
+        mVrFogScale = scale;
+        mVrFogBias = bias;
+    }
     static void SetVrWorldSpriteResolver(bool (*resolver)(uint32_t id, VrWorldSprite* out));
     void SetVrPass(VrPass pass) {
         mVrPass = pass;
@@ -791,6 +800,8 @@ class Interpreter {
     bool mVrInHudSprites = false;
     bool mVrWorldSpriteActive = false;
     float mVrEyeTanHalfY = 0.0f;
+    float mVrFogScale = 1.0f;
+    float mVrFogBias = 0.0f;
     VrWorldSprite mVrWorldSprite{};
     static bool (*sVrWorldSpriteResolver)(uint32_t id, VrWorldSprite* out);
     bool VrPlaceWorldSprite(int32_t* ulx, int32_t* uly, int32_t* lrx, int32_t* lry, int16_t* uls, int16_t* ult,

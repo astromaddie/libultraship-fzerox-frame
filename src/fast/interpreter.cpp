@@ -2829,7 +2829,8 @@ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx
             if (w <= 0.001f) {
                 fogRatio = -1.0f;
             } else {
-                fogRatio = Ship::Math::clamp(z / w, -1.0f, 1.0f);
+                // SetVrFogRemap: the game camera's z/w at this distance (identity off VR eyes).
+                fogRatio = Ship::Math::clamp(mVrFogBias + mVrFogScale * (z / w), -1.0f, 1.0f);
             }
 
             float fog_z = fogRatio * mRsp->fog_mul + mRsp->fog_offset;
@@ -8062,6 +8063,8 @@ void Interpreter::ClearVrEyeTarget() {
         return;
     }
     mVrEyeActive = false;
+    mVrFogScale = 1.0f;
+    mVrFogBias = 0.0f;
     mCurDimensions = mVrSavedDimensions;
     mMsaaLevel = mVrSavedMsaaLevel;
 }
