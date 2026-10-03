@@ -659,6 +659,14 @@ class Interpreter {
         mVrFogScale = scale;
         mVrFogBias = bias;
     }
+    // Clip instead of reject. The F3DEX2.Rej microcodes drop a whole triangle when any vertex is
+    // behind the eye, inside the near plane or past twice the viewport; from a viewpoint on the
+    // player's own machine its large hull faces hit that whenever one corner leaves the view, and
+    // vanish. While set (the host's cockpit eyes), those triangles go to the homogeneous clipper
+    // instead and draw their visible part. Off unless set; ClearVrEyeTarget turns it off.
+    void SetVrClipNotReject(bool clip) {
+        mVrClipNotReject = clip;
+    }
     static void SetVrWorldSpriteResolver(bool (*resolver)(uint32_t id, VrWorldSprite* out));
     void SetVrPass(VrPass pass) {
         mVrPass = pass;
@@ -801,6 +809,7 @@ class Interpreter {
     bool mVrWorldSpriteActive = false;
     float mVrEyeTanHalfY = 0.0f;
     float mVrFogScale = 1.0f;
+    bool mVrClipNotReject = false;
     float mVrFogBias = 0.0f;
     VrWorldSprite mVrWorldSprite{};
     static bool (*sVrWorldSpriteResolver)(uint32_t id, VrWorldSprite* out);

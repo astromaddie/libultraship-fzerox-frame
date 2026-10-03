@@ -3018,7 +3018,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
     // The F3DEX2.Rej family does not clip: it drops any triangle with a vertex outside the reject
     // box (twice the viewport extent in X/Y) or behind the eye. F-Zero X relies on this for the
     // machine screens and FLX vehicles; rasterizing those triangles paints giant wedges.
-    if (!is_rect && sClipFanDepth == 0 &&
+    if (!is_rect && sClipFanDepth == 0 && !mVrClipNotReject &&
         (mF3dex2Variant == F3dex2Variant::Reject || mF3dex2Variant == F3dex2Variant::FZeroFlxReject)) {
         for (const LoadedVertex* vertex : v_arr) {
             const float w2 = 2.0f * vertex->w;
@@ -8065,6 +8065,7 @@ void Interpreter::ClearVrEyeTarget() {
     mVrEyeActive = false;
     mVrFogScale = 1.0f;
     mVrFogBias = 0.0f;
+    mVrClipNotReject = false;
     mCurDimensions = mVrSavedDimensions;
     mMsaaLevel = mVrSavedMsaaLevel;
 }
