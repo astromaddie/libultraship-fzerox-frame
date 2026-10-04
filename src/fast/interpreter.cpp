@@ -2581,6 +2581,11 @@ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx
         if (v == nullptr) {
             return;
         }
+        if (mVrCabinCutActive && dest_index < MAX_VERTICES) {
+            mVrCabinRaw[dest_index][0] = v->ob[0];
+            mVrCabinRaw[dest_index][1] = v->ob[1];
+            mVrCabinRaw[dest_index][2] = v->ob[2];
+        }
 
         float x = v->ob[0] * mRsp->MP_matrix[0][0] + v->ob[1] * mRsp->MP_matrix[1][0] +
                   v->ob[2] * mRsp->MP_matrix[2][0] + mRsp->MP_matrix[3][0];
@@ -2921,6 +2926,24 @@ static const bool sGdxRectHalfTexelDisabled = [] {
 }();
 
 void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bool is_rect) {
+    if (mVrCabinCutActive && !is_rect && vtx1_idx < MAX_VERTICES && vtx2_idx < MAX_VERTICES &&
+        vtx3_idx < MAX_VERTICES) {
+        float c[3];
+        for (int k = 0; k < 3; k++) {
+            c[k] = (mVrCabinRaw[vtx1_idx][k] + mVrCabinRaw[vtx2_idx][k] + mVrCabinRaw[vtx3_idx][k]) * (1.0f / 3.0f);
+        }
+        const float* b = mVrCabinCut.box;
+        if (c[0] > b[0] && c[0] < b[1] && c[1] > b[2] && c[1] < b[3] && c[2] > b[4] && c[2] < b[5]) {
+            return; // inside the cabin: the host draws the cabin here
+        }
+        for (int g = 0; g < mVrCabinCut.glassCount; g++) {
+            const short* q = &mVrCabinCut.glass[g * 3];
+            const float dx = c[0] - q[0], dy = c[1] - q[1], dz = c[2] - q[2];
+            if (dx * dx + dy * dy + dz * dz < 4.0f) {
+                return; // canopy glass: replaced by the host's tinted glass or frame
+            }
+        }
+    }
     if (mVrSuppressDraw && !mVrInHudSprites) {
         return;
     }
@@ -5667,6 +5690,8 @@ bool gfx_noop_handler_f3dex2(F3DGfx** cmd0) {
         mInstance.lock()->OnVrHudMarker();
     } else if (p >= Interpreter::kVrHudSpritesBegin && p <= Interpreter::kVrWorldSpriteEnd) {
         mInstance.lock()->OnVrSpriteMarker(p, l);
+    } else if (p == Interpreter::kVrCabinCutBegin || p == Interpreter::kVrCabinCutEnd) {
+        mInstance.lock()->OnVrCabinMarker(p, l);
     } else if (p == 7) {
         g_exec_stack.openDisp(filename, l);
     } else if (p == 8) {
@@ -7982,6 +8007,21 @@ void Interpreter::SetVrWorldSpriteResolver(bool (*resolver)(uint32_t id, VrWorld
     sVrWorldSpriteResolver = resolver;
 }
 
+bool (*Interpreter::sVrCabinCutResolver)(uint32_t machine, VrCabinCut* out) = nullptr;
+
+void Interpreter::SetVrCabinCutResolver(bool (*resolver)(uint32_t machine, VrCabinCut* out)) {
+    sVrCabinCutResolver = resolver;
+}
+
+void Interpreter::OnVrCabinMarker(uint32_t code, uint32_t machine) {
+    if (code == kVrCabinCutEnd) {
+        mVrCabinCutActive = false;
+        return;
+    }
+    mVrCabinCutActive = mVrEyeActive && mVrCabinCutEnabled && sVrCabinCutResolver != nullptr &&
+                        sVrCabinCutResolver(machine, &mVrCabinCut);
+}
+
 void Interpreter::OnVrSpriteMarker(uint32_t code, uint32_t id) {
     switch (code) {
         case kVrHudSpritesBegin:
@@ -8066,6 +8106,8 @@ void Interpreter::ClearVrEyeTarget() {
     mVrFogScale = 1.0f;
     mVrFogBias = 0.0f;
     mVrClipNotReject = false;
+    mVrCabinCutEnabled = false;
+    mVrCabinCutActive = false;
     mCurDimensions = mVrSavedDimensions;
     mMsaaLevel = mVrSavedMsaaLevel;
 }

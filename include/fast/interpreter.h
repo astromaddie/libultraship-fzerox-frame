@@ -637,6 +637,23 @@ class Interpreter {
     static constexpr uint32_t kVrHudSpritesEnd = 0x58;
     static constexpr uint32_t kVrWorldSpriteBegin = 0x59;
     static constexpr uint32_t kVrWorldSpriteEnd = 0x5A;
+    // Cabin cockpit: the host brackets the player's machine draw with these (begin's low 16 bits are
+    // the machine's stock model index). While inside, in an eye with SetVrCabinCut(true), triangles
+    // whose model-space centre lies in that machine's cabin volume, or on one of its canopy glass
+    // triangles, are not drawn: the host draws a cabin and glass there instead.
+    static constexpr uint32_t kVrCabinCutBegin = 0x5B;
+    static constexpr uint32_t kVrCabinCutEnd = 0x5C;
+    struct VrCabinCut {
+        float box[6];         // x0, x1, y0, y1, z0, z1, model units
+        const short* glass;   // glassCount centres, xyz, model units
+        int glassCount;
+    };
+    static void SetVrCabinCutResolver(bool (*resolver)(uint32_t machine, VrCabinCut* out));
+    void SetVrCabinCut(bool enabled) {
+        mVrCabinCutEnabled = enabled;
+        mVrCabinCutActive = false;
+    }
+    void OnVrCabinMarker(uint32_t code, uint32_t machine);
     // World-sprite anchor: world position, pivot offset of the anchor inside the sprite and sprite
     // size, all in native 320x240 pixels.
     struct VrWorldSprite {
@@ -809,6 +826,11 @@ class Interpreter {
     bool mVrWorldSpriteActive = false;
     float mVrEyeTanHalfY = 0.0f;
     float mVrFogScale = 1.0f;
+    bool mVrCabinCutEnabled = false;
+    bool mVrCabinCutActive = false;
+    VrCabinCut mVrCabinCut{};
+    float mVrCabinRaw[MAX_VERTICES][3]{}; // model-space positions of the loaded vertices, while cutting
+    static bool (*sVrCabinCutResolver)(uint32_t machine, VrCabinCut* out);
     bool mVrClipNotReject = false;
     float mVrFogBias = 0.0f;
     VrWorldSprite mVrWorldSprite{};
