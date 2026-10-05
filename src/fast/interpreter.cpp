@@ -2403,6 +2403,19 @@ void Interpreter::CalculateNormalDir(const F3DLight_t* light, float coeffs[3]) {
 void Interpreter::GfxSpMatrix(uint8_t parameters, const int32_t* addr) {
     float matrix[4][4];
 
+    if (parameters & get_attr(MTX_PROJECTION)) {
+        if ((parameters & get_attr(MTX_LOAD)) && mVrEyeProjAddr != nullptr && (const void*)addr == mVrEyeProjAddr) {
+            memcpy(mRsp->P_matrix, mVrEyeProj, sizeof(mVrEyeProj));
+            mVrEyeProjLoaded = true;
+            ++mVrEyeProjLoads;
+            ComputeMP();
+            return;
+        }
+        // Any other projection load replaces the eye's; a multiply composes with it in world space.
+        VrUnrebaseProjection();
+        mVrEyeProjLoaded = false;
+    }
+
     auto it = mCurMtxReplacements->find((Mtx*)addr);
     if (it != mCurMtxReplacements->end()) {
         for (int i = 0; i < 4; i++) {
@@ -2453,7 +2466,52 @@ void Interpreter::GfxSpMatrix(uint8_t parameters, const int32_t* addr) {
         }
         mRsp->lights_changed = 1;
     }
-    MatrixMul(mRsp->MP_matrix, mRsp->modelview_matrix_stack[mRsp->modelview_matrix_stack_size - 1], mRsp->P_matrix);
+    ComputeMP();
+}
+
+// MP = modelview * projection. With the camera-relative eye projection loaded, the modelview is
+// first translated by -origin (exactly, in double: its row 3 is a world position of up to tens of
+// thousands of units), so the product only ever holds eye-relative magnitudes.
+void Interpreter::ComputeMP() {
+    const float(*mv)[4] = mRsp->modelview_matrix_stack[mRsp->modelview_matrix_stack_size - 1];
+    if (!mVrEyeProjLoaded) {
+        MatrixMul(mRsp->MP_matrix, mv, mRsp->P_matrix);
+        return;
+    }
+    float rel[4][4];
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 3; j++) {
+            rel[i][j] = (float)((double)mv[i][j] - (double)mv[i][3] * mVrEyeOrigin[j]);
+        }
+        rel[i][3] = mv[i][3];
+    }
+    MatrixMul(mRsp->MP_matrix, rel, mRsp->P_matrix);
+}
+
+// Back from the origin-relative eye projection to an ordinary world-space one: P = T(-origin) * P.
+void Interpreter::VrUnrebaseProjection() {
+    if (!mVrEyeProjLoaded) {
+        return;
+    }
+    float(*P)[4] = mRsp->P_matrix;
+    for (int j = 0; j < 4; j++) {
+        P[3][j] = (float)((double)P[3][j] - mVrEyeOrigin[0] * P[0][j] - mVrEyeOrigin[1] * P[1][j] -
+                          mVrEyeOrigin[2] * P[2][j]);
+    }
+    mVrEyeProjLoaded = false;
+}
+
+void Interpreter::SetVrEyeProjection(const void* addr, const float pv[4][4], const double origin[3]) {
+    VrUnrebaseProjection();
+    mVrEyeProjAddr = addr;
+    mVrEyeProjLoads = 0;
+    if (addr == nullptr) {
+        return;
+    }
+    memcpy(mVrEyeProj, pv, sizeof(mVrEyeProj));
+    mVrEyeOrigin[0] = origin[0];
+    mVrEyeOrigin[1] = origin[1];
+    mVrEyeOrigin[2] = origin[2];
 }
 
 void Interpreter::GfxSpPopMatrix(uint32_t count) {
@@ -2461,8 +2519,7 @@ void Interpreter::GfxSpPopMatrix(uint32_t count) {
         if (mRsp->modelview_matrix_stack_size > 0) {
             --mRsp->modelview_matrix_stack_size;
             if (mRsp->modelview_matrix_stack_size > 0) {
-                MatrixMul(mRsp->MP_matrix, mRsp->modelview_matrix_stack[mRsp->modelview_matrix_stack_size - 1],
-                          mRsp->P_matrix);
+                ComputeMP();
             }
         }
     }
@@ -8050,10 +8107,14 @@ bool Interpreter::VrPlaceWorldSprite(int32_t* ulx, int32_t* uly, int32_t* lrx, i
                                      int16_t* ult, int16_t* dsdx, int16_t* dtdy) {
     const VrWorldSprite& ws = mVrWorldSprite;
     const float(*P)[4] = mRsp->P_matrix;
-    const float cx = ws.x * P[0][0] + ws.y * P[1][0] + ws.z * P[2][0] + P[3][0];
-    const float cy = ws.x * P[0][1] + ws.y * P[1][1] + ws.z * P[2][1] + P[3][1];
-    const float cz = ws.x * P[0][2] + ws.y * P[1][2] + ws.z * P[2][2] + P[3][2];
-    const float cw = ws.x * P[0][3] + ws.y * P[1][3] + ws.z * P[2][3] + P[3][3];
+    // The camera-relative eye projection takes positions relative to its origin.
+    const float x = mVrEyeProjLoaded ? (float)((double)ws.x - mVrEyeOrigin[0]) : ws.x;
+    const float y = mVrEyeProjLoaded ? (float)((double)ws.y - mVrEyeOrigin[1]) : ws.y;
+    const float z = mVrEyeProjLoaded ? (float)((double)ws.z - mVrEyeOrigin[2]) : ws.z;
+    const float cx = x * P[0][0] + y * P[1][0] + z * P[2][0] + P[3][0];
+    const float cy = x * P[0][1] + y * P[1][1] + z * P[2][1] + P[3][1];
+    const float cz = x * P[0][2] + y * P[1][2] + z * P[2][2] + P[3][2];
+    const float cw = x * P[0][3] + y * P[1][3] + z * P[2][3] + P[3][3];
     if (!(cw > 0.001f)) {
         return false;
     }
@@ -8103,6 +8164,7 @@ void Interpreter::ClearVrEyeTarget() {
         return;
     }
     mVrEyeActive = false;
+    SetVrEyeProjection(nullptr, nullptr, nullptr);
     mVrFogScale = 1.0f;
     mVrFogBias = 0.0f;
     mVrClipNotReject = false;

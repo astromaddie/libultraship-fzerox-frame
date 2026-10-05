@@ -684,6 +684,18 @@ class Interpreter {
     void SetVrClipNotReject(bool clip) {
         mVrClipNotReject = clip;
     }
+    // Camera-relative eye projection. A G_MTX_PROJECTION load of `addr` (the host's eye
+    // projection*view slot) takes `pv` instead of the s15.16 matrix stored there. `pv` maps
+    // positions relative to `origin` (the eye anchor, world units) to clip space, and while it is
+    // the loaded projection every MP is formed from the modelview translated by -origin in double.
+    // Geometry near the eye is then transformed in small numbers: an s15.16 projection*view
+    // carrying a world translation of thousands of units rounds to ~0.1 units, which reads as
+    // degrees of jitter on a cockpit a few units away. Null `addr` turns it off; ClearVrEyeTarget
+    // does too.
+    void SetVrEyeProjection(const void* addr, const float pv[4][4], const double origin[3]);
+    uint32_t VrEyeProjectionLoads() const {
+        return mVrEyeProjLoads;
+    }
     static void SetVrWorldSpriteResolver(bool (*resolver)(uint32_t id, VrWorldSprite* out));
     void SetVrPass(VrPass pass) {
         mVrPass = pass;
@@ -833,6 +845,13 @@ class Interpreter {
     static bool (*sVrCabinCutResolver)(uint32_t machine, VrCabinCut* out);
     bool mVrClipNotReject = false;
     float mVrFogBias = 0.0f;
+    const void* mVrEyeProjAddr = nullptr;
+    float mVrEyeProj[4][4]{};
+    double mVrEyeOrigin[3]{};
+    bool mVrEyeProjLoaded = false; // P_matrix is mVrEyeProj (origin-relative)
+    uint32_t mVrEyeProjLoads = 0;
+    void VrUnrebaseProjection();
+    void ComputeMP();
     VrWorldSprite mVrWorldSprite{};
     static bool (*sVrWorldSpriteResolver)(uint32_t id, VrWorldSprite* out);
     bool VrPlaceWorldSprite(int32_t* ulx, int32_t* uly, int32_t* lrx, int32_t* lry, int16_t* uls, int16_t* ult,
